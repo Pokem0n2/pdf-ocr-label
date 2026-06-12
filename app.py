@@ -70,6 +70,32 @@ def do_ocr(page_num, doc):
         })
     return anns
 
+def do_ocr_region(page_num, doc, bbox):
+    """对指定区域进行OCR识别"""
+    ocr = get_ocr()
+    page = doc[page_num]
+    mat = fitz.Matrix(OCR_ZOOM, OCR_ZOOM)
+    pix = page.get_pixmap(matrix=mat)
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if img.shape[2] == 4:
+        img = img[:, :, :3]
+    # 裁剪区域
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    h, w = img.shape[:2]
+    x1 = max(0, min(x1, w))
+    x2 = max(0, min(x2, w))
+    y1 = max(0, min(y1, h))
+    y2 = max(0, min(y2, h))
+    if x2 <= x1 or y2 <= y1:
+        return ""
+    crop = img[y1:y2, x1:x2]
+    result = ocr.ocr(crop)
+    item = result[0]
+    texts = []
+    for i in range(len(item.get('rec_texts', []))):
+        texts.append(item['rec_texts'][i])
+    return " ".join(texts)
+
 # ==================== 渲染 ====================
 def render_page(page_num, doc, anns=None, sel_idx=None):
     if doc is None:
@@ -160,6 +186,14 @@ async def api_ocr(sid: str = Form(...), page: int = Form(...)):
     img_b64 = render_page(p, S['doc'], S['anns'][p], None)
     return {"img": img_b64, "anns": S['anns'][p]}
 
+@app.post("/api/ocr_region")
+async def api_ocr_region(sid: str = Form(...), page: int = Form(...), bbox: str = Form(...)):
+    S = get_session(sid)
+    p = page - 1
+    bbox_list = json.loads(bbox)
+    text = do_ocr_region(p, S['doc'], bbox_list)
+    return {"text": text}
+
 @app.post("/api/page")
 async def api_page(sid: str = Form(...), page: int = Form(...)):
     S = get_session(sid)
@@ -209,7 +243,7 @@ HTML_PAGE = '''
 <html>
 <head>
 <meta charset="utf-8">
-<title>PDF条文标注工具 v7.0</title>
+<title>PDF条文标注工具 v7.3</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; }
@@ -232,9 +266,11 @@ input[type="number"] { width: 50px; padding: 4px; border: 1px solid #ddd; border
 .ann-item { padding: 8px 12px; margin: 4px 0; border: 1px solid #e0e0e0; border-radius: 4px; cursor: grab; background: #fff; font-size: 13px; display: flex; align-items: center; gap: 8px; }
 .ann-item:hover { border-color: #1a73e8; }
 .ann-item.selected { border-color: #dc3232; background: #fff5f5; }
+.ann-item.multi-selected { border-color: #ff9800; background: #fff8e1; }
 .ann-item.dragging { opacity: 0.5; }
 .ann-item .num { width: 22px; height: 22px; border-radius: 50%; background: #1a73e8; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; }
 .ann-item.selected .num { background: #dc3232; }
+.ann-item.multi-selected .num { background: #ff9800; }
 .ann-item .text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ann-item .conf { color: #888; font-size: 11px; flex-shrink: 0; }
 .ann-item .skip-badge { color: #999; font-size: 11px; }
@@ -251,7 +287,8 @@ input[type="number"] { width: 50px; padding: 4px; border: 1px solid #ddd; border
 </head>
 <body>
 <div class="header">
-    <h1>📄 PDF条文标注工具 v7.0</h1>
+    <h1>📄 PDF条文标注工具 v7.3</h1>
+    <span id="version-check" style="color:#dc3232; font-size:12px; margin-right:10px;">(请确认看到此红色文字)</span>
     <input type="file" id="file-input" accept=".pdf" class="hidden">
     <button class="btn" onclick="document.getElementById('file-input').click()">📁 上传PDF</button>
     <button class="btn" id="btn-prev">⬅</button>
@@ -269,10 +306,12 @@ input[type="number"] { width: 50px; padding: 4px; border: 1px solid #ddd; border
         <div id="ann-list"></div>
         <div class="help">
             <b>快捷键：</b><br>
-            <kbd>↑</kbd> <kbd>↓</kbd> 选中上下移动<br>
+            <kbd>↑</kbd> <kbd>↓</kbd> 调整选中块位置<br>
             <kbd>Delete</kbd> 删除选中<br>
-            <kbd>Shift</kbd>+拖拽 新建标注块<br>
-            点击标注块选中，点击画布空白处取消
+            <kbd>Shift</kbd>+拖拽 框选多选/新建<br>
+            <kbd>Ctrl</kbd>+点击 多选切换<br>
+            点击标注块选中，再次点击取消<br>
+            右侧：显示全部文本，可直接编辑
         </div>
     </div>
     <div class="panel-center">
@@ -293,6 +332,7 @@ let sid = null;
 let page = 1, total = 1;
 let anns = [];
 let selIdx = -1;
+let multiSel = [];  // 多选索引数组
 let imgWidth = 0, imgHeight = 0;
 let scale = 1;  // 显示缩放
 
@@ -308,11 +348,21 @@ function renderList() {
     list.innerHTML = '';
     anns.forEach((ann, idx) => {
         const div = document.createElement('div');
-        div.className = 'ann-item' + (idx === selIdx ? ' selected' : '') + (ann.skipped ? ' skipped' : '');
+        let cls = 'ann-item';
+        if (idx === selIdx) cls += ' selected';
+        else if (multiSel.includes(idx)) cls += ' multi-selected';
+        if (ann.skipped) cls += ' skipped';
+        div.className = cls;
         div.draggable = true;
         div.dataset.idx = idx;
         div.innerHTML = `<span class="num">${idx+1}</span><span class="text">${escapeHtml(ann.text || '')}</span><span class="conf">${(ann.confidence*100).toFixed(0)}%</span>${ann.skipped ? '<span class="skip-badge">⏭</span>' : ''}`;
-        div.onclick = () => selectAnn(idx);
+        div.onclick = (e) => {
+            if (e.shiftKey) {
+                toggleMultiSel(idx);
+            } else {
+                selectAnn(idx);
+            }
+        };
         div.ondragstart = (e) => { e.dataTransfer.setData('text/plain', idx); div.classList.add('dragging'); };
         div.ondragend = () => div.classList.remove('dragging');
         div.ondragover = (e) => { e.preventDefault(); };
@@ -355,15 +405,24 @@ function renderCanvas() {
         if (ann.skipped) return;
         const [x1, y1, x2, y2] = ann.bbox;
         const isSel = idx === selIdx;
-        ctx.strokeStyle = isSel ? '#dc3232' : '#1a73e8';
-        ctx.lineWidth = isSel ? 3 : 1.5;
-        ctx.strokeRect(x1 * scale, y1 * scale, (x2-x1) * scale, (y2-y1) * scale);
+        const isMulti = multiSel.includes(idx);
         if (isSel) {
-            ctx.fillStyle = 'rgba(220, 50, 50, 0.1)';
+            ctx.strokeStyle = '#dc3232';
+            ctx.lineWidth = 3;
+        } else if (isMulti) {
+            ctx.strokeStyle = '#ff9800';
+            ctx.lineWidth = 2.5;
+        } else {
+            ctx.strokeStyle = '#1a73e8';
+            ctx.lineWidth = 1.5;
+        }
+        ctx.strokeRect(x1 * scale, y1 * scale, (x2-x1) * scale, (y2-y1) * scale);
+        if (isSel || isMulti) {
+            ctx.fillStyle = isSel ? 'rgba(220, 50, 50, 0.1)' : 'rgba(255, 152, 0, 0.08)';
             ctx.fillRect(x1 * scale, y1 * scale, (x2-x1) * scale, (y2-y1) * scale);
         }
         // 编号标签
-        ctx.fillStyle = isSel ? '#dc3232' : '#1a73e8';
+        ctx.fillStyle = isSel ? '#dc3232' : (isMulti ? '#ff9800' : '#1a73e8');
         const lbl = String(idx + 1);
         ctx.font = 'bold 13px sans-serif';
         const tm = ctx.measureText(lbl);
@@ -375,17 +434,85 @@ function renderCanvas() {
 }
 
 function selectAnn(idx) {
+    // 再次点击已选中的块，取消选中
+    if (idx === selIdx && multiSel.length === 0) {
+        selIdx = -1;
+        renderList();
+        renderCanvas();
+        return;
+    }
     selIdx = idx;
+    multiSel = [];  // 单选时清空多选
     renderList();
     renderCanvas();
-    const editor = document.getElementById('text-editor');
-    if (idx >= 0 && idx < anns.length) {
-        editor.value = anns[idx].text || '';
-        editor.disabled = false;
+    // 光标定位到对应行
+    focusEditorLine(idx);
+}
+
+function toggleMultiSel(idx) {
+    const pos = multiSel.indexOf(idx);
+    if (pos >= 0) {
+        multiSel.splice(pos, 1);
     } else {
-        editor.value = '';
-        editor.disabled = true;
+        multiSel.push(idx);
     }
+    if (multiSel.length === 1) {
+        selIdx = multiSel[0];
+    } else {
+        selIdx = -1;
+    }
+    renderList();
+    renderCanvas();
+}
+
+// 右侧始终显示全部文本，始终可编辑
+function updateRightPanel() {
+    const editor = document.getElementById('text-editor');
+    editor.disabled = false;
+    const lines = anns
+        .filter(a => !a.skipped)
+        .map((a, i) => '[' + (i+1) + '] ' + (a.text || ''));
+    editor.value = lines.join(`
+`);
+}
+
+// 光标定位到第idx行（0-based）
+function focusEditorLine(idx) {
+    const editor = document.getElementById('text-editor');
+    if (idx < 0 || idx >= anns.length) return;
+    // 计算行前字符位置
+    let pos = 0;
+    for (let i = 0; i < idx; i++) {
+        pos += ('[' + (i+1) + '] ' + (anns[i].text || '')).length + 1; // +1 for \n
+    }
+    // 定位到行首 '[' 后面
+    pos += ('[' + (idx+1) + '] ').length;
+    editor.setSelectionRange(pos, pos);
+    editor.focus();
+}
+
+// 解析右侧全部文本，同步回标注块
+function parseAndSaveAllText() {
+    const editor = document.getElementById('text-editor');
+    const text = editor.value;
+    // 按 [N] 前缀分割，支持 N 从1开始
+    const regex = /\[(\d+)\] /g;
+    const matches = [];
+    let m;
+    while ((m = regex.exec(text)) !== null) {
+        matches.push({ index: m.index, num: parseInt(m[1]) });
+    }
+    // 提取每个标注块的文本
+    for (let i = 0; i < matches.length; i++) {
+        const start = matches[i].index + ('[' + matches[i].num + '] ').length;
+        const end = (i + 1 < matches.length) ? matches[i + 1].index : text.length;
+        const blockText = text.substring(start, end).replace(/\\\\n$/, ''); // 去掉末尾换行
+        const annIdx = matches[i].num - 1; // 编号从1开始，索引从0开始
+        if (annIdx >= 0 && annIdx < anns.length) {
+            anns[annIdx].text = blockText;
+        }
+    }
+    renderList();
 }
 
 // ==================== 鼠标交互 ====================
@@ -408,7 +535,21 @@ canvas.addEventListener('mousedown', (e) => {
                 break;
             }
         }
-        selectAnn(clicked);
+        if (clicked >= 0) {
+            if (e.ctrlKey || e.metaKey) {
+                toggleMultiSel(clicked);
+            } else {
+                selectAnn(clicked);
+            }
+        } else {
+            // 点击空白处，取消选中
+            if (selIdx !== -1 || multiSel.length > 0) {
+                selIdx = -1;
+                multiSel = [];
+                renderList();
+                renderCanvas();
+            }
+        }
     }
 });
 
@@ -426,7 +567,7 @@ canvas.addEventListener('mousemove', (e) => {
     ctx.setLineDash([]);
 });
 
-canvas.addEventListener('mouseup', (e) => {
+canvas.addEventListener('mouseup', async (e) => {
     if (!isDragging || !isShift) {
         isDragging = false;
         return;
@@ -436,13 +577,45 @@ canvas.addEventListener('mouseup', (e) => {
     const y = (e.clientY - rect.top) / scale;
     const x1 = Math.min(dragStart.x, x), x2 = Math.max(dragStart.x, x);
     const y1 = Math.min(dragStart.y, y), y2 = Math.max(dragStart.y, y);
-    if (x2 - x1 > 10 && y2 - y1 > 10) {
-        // 新建标注块
-        const newAnn = { id: generateId(), bbox: [x1, y1, x2, y2], text: '', confidence: 1.0, skipped: false };
+    
+    // 检查是否框选了已有标注块
+    const boxSelected = [];
+    for (let i = 0; i < anns.length; i++) {
+        const [ax1, ay1, ax2, ay2] = anns[i].bbox;
+        // 计算框与标注块的重叠面积
+        const ix1 = Math.max(x1, ax1), iy1 = Math.max(y1, ay1);
+        const ix2 = Math.min(x2, ax2), iy2 = Math.min(y2, ay2);
+        if (ix2 > ix1 && iy2 > iy1) {
+            boxSelected.push(i);
+        }
+    }
+    
+    if (boxSelected.length > 0) {
+        // 框选了已有标注块，进行多选
+        multiSel = boxSelected;
+        selIdx = -1;
+        renderList();
+        renderCanvas();
+        updateServer();
+    } else if (x2 - x1 > 10 && y2 - y1 > 10) {
+        // 新建标注块，并立刻OCR识别
+        document.getElementById('status').textContent = '正在识别新建区域...';
+        const bbox = [x1, y1, x2, y2];
+        const r = await postForm('/api/ocr_region', { sid, page, bbox: JSON.stringify(bbox) });
+        const newAnn = { 
+            id: generateId(), 
+            bbox: bbox, 
+            text: r.text || '', 
+            confidence: 1.0, 
+            skipped: false 
+        };
         anns.push(newAnn);
         selectAnn(anns.length - 1);
+        updateRightPanel();
         updateServer();
+        document.getElementById('status').textContent = '新建并识别完成';
     }
+    
     isDragging = false;
     dragStart = null;
     canvas.style.cursor = 'pointer';
@@ -456,10 +629,21 @@ function generateId() {
 document.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selIdx >= 0 && selIdx < anns.length) {
+        if (multiSel.length > 0) {
+            // 删除多选
+            const sorted = [...multiSel].sort((a, b) => b - a);
+            for (let idx of sorted) {
+                anns.splice(idx, 1);
+            }
+            multiSel = [];
+            selIdx = -1;
+            updateServer();
+            updateRightPanel();
+        } else if (selIdx >= 0 && selIdx < anns.length) {
             anns.splice(selIdx, 1);
             selIdx = -1;
             updateServer();
+            updateRightPanel();
         }
     } else if (e.key === 'ArrowUp') {
         e.preventDefault();
@@ -468,6 +652,7 @@ document.addEventListener('keydown', (e) => {
             [anns[selIdx], anns[selIdx - 1]] = [anns[selIdx - 1], anns[selIdx]];
             selIdx--;
             updateServer();
+            updateRightPanel();
         }
     } else if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -476,16 +661,21 @@ document.addEventListener('keydown', (e) => {
             [anns[selIdx], anns[selIdx + 1]] = [anns[selIdx + 1], anns[selIdx]];
             selIdx++;
             updateServer();
+            updateRightPanel();
         }
     }
 });
 
-// ==================== 文本编辑 ====================
+// ==================== 文本编辑自动保存 ====================
+let saveTimeout = null;
 document.getElementById('text-editor').addEventListener('input', (e) => {
-    if (selIdx >= 0 && selIdx < anns.length) {
-        anns[selIdx].text = e.target.value;
-        renderList();
-    }
+    // 解析全部文本，同步回标注块
+    parseAndSaveAllText();
+    // 防抖自动保存到服务器
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(() => {
+        updateServer();
+    }, 500);
 });
 
 // ==================== API ====================
@@ -510,41 +700,43 @@ document.getElementById('file-input').addEventListener('change', async (e) => {
     form.append('file', file);
     const r = await fetch('/api/upload', { method: 'POST', body: form });
     const data = await r.json();
-    sid = data.sid; page = data.page; total = data.total; anns = data.anns; selIdx = -1;
+    sid = data.sid; page = data.page; total = data.total; anns = data.anns; selIdx = -1; multiSel = [];
     document.getElementById('page-info').textContent = page + ' / ' + total;
     document.getElementById('page-jump').value = page;
     document.getElementById('page-jump').max = total;
-    if (data.img) { img.src = 'data:image/png;base64,' + data.img; img.onload = () => { imgWidth = img.naturalWidth; imgHeight = img.naturalHeight; renderCanvas(); renderList(); }; }
+    if (data.img) { img.src = 'data:image/png;base64,' + data.img; img.onload = () => { imgWidth = img.naturalWidth; imgHeight = img.naturalHeight; renderCanvas(); renderList(); updateRightPanel(); }; }
     document.getElementById('status').textContent = '已加载: ' + data.name;
+    // 重置file-input，允许再次选择相同文件
+    e.target.value = '';
 });
 
 // 翻页
 document.getElementById('btn-prev').addEventListener('click', async () => {
     if (page <= 1) return;
     const r = await postForm('/api/page', { sid, page: page - 1 });
-    page = r.page; anns = r.anns; selIdx = -1;
+    page = r.page; anns = r.anns; selIdx = -1; multiSel = [];
     document.getElementById('page-info').textContent = page + ' / ' + total;
     document.getElementById('page-jump').value = page;
-    if (r.img) { img.src = 'data:image/png;base64,' + r.img; img.onload = () => { imgWidth = img.naturalWidth; imgHeight = img.naturalHeight; renderCanvas(); renderList(); }; }
+    if (r.img) { img.src = 'data:image/png;base64,' + r.img; img.onload = () => { imgWidth = img.naturalWidth; imgHeight = img.naturalHeight; renderCanvas(); renderList(); updateRightPanel(); }; }
 });
 
 document.getElementById('btn-next').addEventListener('click', async () => {
     if (page >= total) return;
     const r = await postForm('/api/page', { sid, page: page + 1 });
-    page = r.page; anns = r.anns; selIdx = -1;
+    page = r.page; anns = r.anns; selIdx = -1; multiSel = [];
     document.getElementById('page-info').textContent = page + ' / ' + total;
     document.getElementById('page-jump').value = page;
-    if (r.img) { img.src = 'data:image/png;base64,' + r.img; img.onload = () => { imgWidth = img.naturalWidth; imgHeight = img.naturalHeight; renderCanvas(); renderList(); }; }
+    if (r.img) { img.src = 'data:image/png;base64,' + r.img; img.onload = () => { imgWidth = img.naturalWidth; imgHeight = img.naturalHeight; renderCanvas(); renderList(); updateRightPanel(); }; }
 });
 
 document.getElementById('btn-jump').addEventListener('click', async () => {
     const p = parseInt(document.getElementById('page-jump').value);
     if (!p || p < 1 || p > total) return;
     const r = await postForm('/api/page', { sid, page: p });
-    page = r.page; anns = r.anns; selIdx = -1;
+    page = r.page; anns = r.anns; selIdx = -1; multiSel = [];
     document.getElementById('page-info').textContent = page + ' / ' + total;
     document.getElementById('page-jump').value = page;
-    if (r.img) { img.src = 'data:image/png;base64,' + r.img; img.onload = () => { imgWidth = img.naturalWidth; imgHeight = img.naturalHeight; renderCanvas(); renderList(); }; }
+    if (r.img) { img.src = 'data:image/png;base64,' + r.img; img.onload = () => { imgWidth = img.naturalWidth; imgHeight = img.naturalHeight; renderCanvas(); renderList(); updateRightPanel(); }; }
 });
 
 // OCR
@@ -552,8 +744,8 @@ document.getElementById('btn-ocr').addEventListener('click', async () => {
     if (!sid) return;
     document.getElementById('status').textContent = '正在识别...';
     const r = await postForm('/api/ocr', { sid, page });
-    anns = r.anns; selIdx = -1;
-    if (r.img) { img.src = 'data:image/png;base64,' + r.img; img.onload = () => { imgWidth = img.naturalWidth; imgHeight = img.naturalHeight; renderCanvas(); renderList(); }; }
+    anns = r.anns; selIdx = -1; multiSel = [];
+    if (r.img) { img.src = 'data:image/png;base64,' + r.img; img.onload = () => { imgWidth = img.naturalWidth; imgHeight = img.naturalHeight; renderCanvas(); renderList(); updateRightPanel(); }; }
     document.getElementById('status').textContent = '识别完成，共 ' + anns.length + ' 个标注块';
 });
 
