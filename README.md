@@ -1,13 +1,13 @@
-# PDF条文标注工具 v1.0
+# PDF条文标注工具 v7.1
 
-基于 Streamlit + PaddleOCR 的半自动标注工具，用于工程规范PDF的AI预标注 + 人工修正。
+基于 FastAPI + PaddleOCR 的半自动标注工具，用于工程规范PDF的OCR识别 + 人工校验 → 导出清洗纯文本。
 
 ## 功能特性
 
-- **AI预标注**：自动识别PDF中的文本、表格、公式区域
-- **人工修正**：支持修改识别结果、调整区域边界
-- **多类型支持**：文本条文、表格、公式、图片
-- **数据集导出**：支持Alpaca格式的JSONL和CSV导出
+- **OCR识别**：本地PaddleOCR PP-OCRv6模型，无需API Key
+- **人工校验**：逐页手动校验，支持拖拽排序、位置调整
+- **纯文本导出**：导出清洗后的纯文本文件（.txt）
+- **三栏布局**：左栏标注列表、中栏PDF画布、右栏文本编辑
 
 ## 安装
 
@@ -17,43 +17,33 @@ python3 -m venv ~/pdf-label-env
 source ~/pdf-label-env/bin/activate
 
 # 安装依赖
+pip install fastapi uvicorn python-multipart pymupdf pillow numpy
 pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-pip install paddleocr pymupdf streamlit
-pip install streamlit-drawable-canvas pandas pillow numpy
+pip install paddlex
 ```
 
 ## 启动
 
 ```bash
 cd ~/pdf-label-tool
-./run.sh
-```
-
-或手动：
-```bash
 source ~/pdf-label-env/bin/activate
-streamlit run app.py
+python app.py
 ```
 
 ## 使用说明
 
 ### 操作流程
 1. 上传PDF文件
-2. 点击「运行AI预标注」自动识别
-3. 在右侧编辑器中修正识别结果
-4. 逐页完成标注
-5. 导出数据集
-
-### 标注规范
-- 📝 **文本条文**：规范正文、条款说明
-- 📊 **表格**：数据表格、参数表
-- 🔢 **公式**：数学公式、计算公式
-- 🖼️ **图片/图示**：示意图、流程图
-- ⏭️ **跳过**：目录、页眉页脚、广告页
+2. 点击「识别本页」自动OCR识别
+3. 在右侧面板查看/编辑识别文本
+4. 逐页完成标注校验
+5. 导出清洗纯文本
 
 ### 快捷键
-- 页面导航：上一页/下一页按钮
-- 批量操作：跳过低置信度、全部标记为文本
+- `↑` `↓`：调整选中标注块位置（交换顺序）
+- `Delete`：删除选中标注块
+- `Shift`+拖拽：新建标注块
+- 点击标注块选中，点击画布空白处取消
 
 ## 访问地址
 
@@ -63,28 +53,14 @@ streamlit run app.py
 
 ## 技术栈
 
-- **OCR引擎**：PaddleOCR 3.0 (PP-OCRv6)
+- **OCR引擎**：PaddleOCR PP-OCRv6（本地模型）
 - **PDF渲染**：PyMuPDF
-- **Web界面**：Streamlit
-- **数据存储**：SQLite/JSONL
-
-## 数据集格式
-
-### Alpaca JSONL
-```json
-{
-  "instruction": "请解释以下工程规范条文：\n...",
-  "input": "",
-  "output": "...",
-  "source": "PDF第1页",
-  "type": "text",
-  "confidence": 0.95,
-  "bbox": [x1, y1, x2, y2]
-}
-```
+- **Web框架**：FastAPI + 原生HTML/JS
+- **导出格式**：纯文本（.txt）
 
 ## 注意事项
 
 - 首次使用需要下载OCR模型（约100MB）
 - 支持GPU加速（CUDA）
 - 建议Chrome浏览器访问
+- 三栏宽度比例：15% : 50% : 35%
