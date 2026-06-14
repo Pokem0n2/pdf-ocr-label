@@ -10,7 +10,7 @@
 - **三栏布局**：左栏标注列表、中栏PDF画布、右栏文本编辑
 - **交互操作**：拖拽排序、Shift框选多选/新建、Ctrl+点击多选
 
-## 安装
+## Linux 安装与启动
 
 ```bash
 # 创建虚拟环境
@@ -23,13 +23,48 @@ pip install paddlepaddle -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
 pip install paddlex
 ```
 
-## 启动
-
 ```bash
+# 启动
 cd ~/pdf-label-tool
 source ~/pdf-label-env/bin/activate
 python app.py
 ```
+
+## Windows 11 安装与启动
+
+### 方式一：Python 原版（需安装 Python 环境）
+
+```powershell
+# 创建虚拟环境
+python -m venv pdf-label-env
+pdf-label-env\Scripts\activate
+
+# 安装依赖
+pip install fastapi uvicorn python-multipart pymupdf pillow numpy
+pip install paddlepaddle
+pip install paddleocr paddlex
+
+# 启动
+python app.py
+```
+
+### 方式二：Tauri 桌面版（免安装 Python，推荐）
+
+无需配置 Python 环境，构建后得到独立 .exe 安装包，双击即可运行。
+
+**前置条件**：Python 3.11+、Rust、Node.js 18+、MSVC Build Tools
+
+```powershell
+# 一键构建（自动完成 Python依赖→PyInstaller打包→Tauri编译）
+cd pdf-ocr-label
+powershell -ExecutionPolicy Bypass -File win11\build.ps1
+```
+
+构建产物位于 `win11\output\`，包含 `.exe` 和 `.msi` 安装包（约500-700MB，内含全部依赖）。
+
+安装后双击桌面图标即可使用，完全离线运行（首次使用 OCR 需联网下载模型约50MB）。
+
+> 详细构建说明见 [win11/README.md](win11/README.md)
 
 ## 使用说明
 
