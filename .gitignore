@@ -1,0 +1,15 @@
+# 构建产物
+win11/dist/
+win11/build/
+win11/output/
+__pycache__/
+*.pyc
+
+# Tauri 构建产物
+src-tauri/target/
+*.exe
+*.msi
+
+# IDE
+.vscode/
+.idea/
